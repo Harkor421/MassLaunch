@@ -1,0 +1,17 @@
+{
+  "name": "mass-launch",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Mass-launch pump.fun tokens via plain RPC (no Jito, no dev buy)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "@pump-fun/pump-sdk": "1.33.0",
+    "@solana/web3.js": "^1.98.0",
+    "bs58": "^6.0.0",
+    "dotenv": "^16.4.7",
+    "ws": "^8.20.0"
+  }
+}
