@@ -26,7 +26,7 @@ import { createHash } from 'crypto';
 
 dotenv.config();
 
-const PORT = parseInt(process.env.PORT) || 5099;
+const PORT = parseInt(process.env.PORT) || 43904;
 const RPC_URL = process.env.RPC_URL;
 if (!RPC_URL) { console.error('Missing RPC_URL'); process.exit(1); }
 
@@ -176,7 +176,7 @@ const wss = new WebSocketServer({
     const remote = info.req.socket.remoteAddress || '';
     const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
     if (!isLoopback) return cb(false, 403, 'Forbidden');
-    const allowed = new Set(['http://localhost:5180', 'http://127.0.0.1:5180', '', 'null']);
+    const allowed = new Set(['http://localhost:43900', 'http://127.0.0.1:43900', 'http://localhost:5180', 'http://127.0.0.1:5180', '', 'null']);
     if (!allowed.has(info.origin || '')) return cb(false, 403, 'Forbidden');
     cb(true);
   },
