@@ -30,6 +30,14 @@ const PORT = parseInt(process.env.PORT) || 43904;
 const RPC_URL = process.env.RPC_URL;
 if (!RPC_URL) { console.error('Missing RPC_URL'); process.exit(1); }
 
+// SECURITY: bind to loopback only by default — never expose to LAN/internet locally.
+// PUBLIC_MODE (set ALLOW_PUBLIC=true on Railway) lifts the loopback/origin gate and
+// binds all interfaces so the service is reachable over the internet. When the flag is
+// unset (local default) it stays loopback-only + origin-checked, so it's never exposed
+// unless you explicitly opt in.
+const PUBLIC_MODE = process.env.ALLOW_PUBLIC === 'true';
+const WS_HOST = process.env.WS_HOST || (PUBLIC_MODE ? '0.0.0.0' : '127.0.0.1');
+
 const connection = new Connection(RPC_URL, 'confirmed');
 const PUMP_SDK = new PumpSdk();
 
@@ -170,9 +178,10 @@ async function launchOneToken({ devKp, mintKp, tokenInfo, cuLimit, cuPrice, cash
 // WS server (loopback-only + origin-checked, like the other services)
 // ────────────────────────────────────────────────────────────────────────────
 const wss = new WebSocketServer({
-  host: '127.0.0.1',
+  host: WS_HOST,
   port: PORT,
   verifyClient: (info, cb) => {
+    if (PUBLIC_MODE) { cb(true); return; } // public/Railway deploy — no loopback/origin gate
     const remote = info.req.socket.remoteAddress || '';
     const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
     if (!isLoopback) return cb(false, 403, 'Forbidden');
@@ -181,7 +190,7 @@ const wss = new WebSocketServer({
     cb(true);
   },
 });
-console.log(`MassLaunch WS listening on ws://127.0.0.1:${PORT} (loopback-only, origin-checked)`);
+console.log(`MassLaunch WS listening on ws://${WS_HOST}:${PORT}${PUBLIC_MODE ? ' (PUBLIC)' : ' (loopback-only, origin-checked)'}`);
 
 wss.on('connection', (ws) => {
   console.log('Client connected');
