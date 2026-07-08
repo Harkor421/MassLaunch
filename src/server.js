@@ -30,6 +30,14 @@ const PORT = parseInt(process.env.PORT) || 43904;
 const RPC_URL = process.env.RPC_URL;
 if (!RPC_URL) { console.error('Missing RPC_URL'); process.exit(1); }
 
+// Metadata is self-pinned to IPFS via Pinata. pump.fun's own /api/ipfs endpoint sits
+// behind Cloudflare, which 429-blocks datacenter IPs (Railway) — so we pin the image +
+// metadata JSON ourselves and pass the resulting URI to createV2. Set PINATA_JWT on the
+// service. IPFS_GATEWAY is where the on-chain URI + image URL point (any public gateway).
+const PINATA_JWT = process.env.PINATA_JWT;
+const IPFS_GATEWAY = (process.env.IPFS_GATEWAY || 'https://ipfs.io/ipfs/').replace(/\/+$/, '') + '/';
+if (!PINATA_JWT) console.warn('[warn] Missing PINATA_JWT — metadata uploads will fail until it is set on the service');
+
 // SECURITY: bind to loopback only by default — never expose to LAN/internet locally.
 // PUBLIC_MODE (set ALLOW_PUBLIC=true on Railway) lifts the loopback/origin gate and
 // binds all interfaces so the service is reachable over the internet. When the flag is
@@ -42,8 +50,9 @@ const connection = new Connection(RPC_URL, 'confirmed');
 const PUMP_SDK = new PumpSdk();
 
 // ────────────────────────────────────────────────────────────────────────────
-// Metadata upload — same endpoint pump.fun's UI uses. Accepts a base64 image
-// from the frontend and posts it as multipart/form-data.
+// Metadata upload — pins the image + metadata JSON to IPFS via Pinata and returns
+// the metadata URI. Accepts a base64 image from the frontend. (Not pump.fun's
+// /api/ipfs, which Cloudflare-blocks datacenter IPs like Railway with 429.)
 // ────────────────────────────────────────────────────────────────────────────
 // In-memory metadata cache. Keyed by a SHA-256 of the input fields. Lets us
 // upload once and reuse for every launch in a batch with identical metadata.
@@ -80,32 +89,56 @@ function metadataKey({ name, symbol, description, twitter, telegram, website, fi
   return h.digest('hex');
 }
 
+// POST to Pinata with a small retry on transient (429/5xx) failures.
+async function pinataFetch(url, options) {
+  let lastErr;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const resp = await fetch(url, options);
+    if (resp.ok) return resp.json();
+    const text = await resp.text();
+    // Retry only on rate-limit / server errors; fail fast on 4xx (bad key, bad body)
+    if (resp.status === 429 || resp.status >= 500) {
+      lastErr = new Error(`Pinata ${resp.status}: ${text.slice(0, 200)}`);
+      if (attempt < 3) { await new Promise(r => setTimeout(r, 800 * attempt)); continue; }
+    }
+    throw new Error(`Pinata request failed (${resp.status}): ${text.slice(0, 200)}`);
+  }
+  throw lastErr;
+}
+
 async function uploadTokenMetadata({ name, symbol, description, twitter, telegram, website, fileBase64 }) {
   if (!fileBase64) throw new Error('Missing image (fileBase64)');
+  if (!PINATA_JWT) throw new Error('Missing PINATA_JWT — set it on the masslaunch Railway service');
 
   // base64 data URL → Blob
   const m = fileBase64.match(/^data:([^;]+);base64,(.*)$/);
   const mime = m ? m[1] : 'image/png';
   const b64 = m ? m[2] : fileBase64;
   const buf = Buffer.from(b64, 'base64');
-  const blob = new Blob([buf], { type: mime });
+  const filename = /jpe?g/i.test(mime) ? 'image.jpg' : /png/i.test(mime) ? 'image.png' : 'image';
 
-  const formData = new FormData();
-  formData.append('file', blob, mime.includes('jpeg') ? 'image.jpg' : 'image.png');
-  formData.append('name', name);
-  formData.append('symbol', symbol);
-  formData.append('description', description || '');
-  formData.append('twitter', twitter || '');
-  formData.append('telegram', telegram || '');
-  formData.append('website', website || '');
-  formData.append('showName', 'true');
+  // 1) Pin the image
+  const fileForm = new FormData();
+  fileForm.append('file', new Blob([buf], { type: mime }), filename);
+  const fileRes = await pinataFetch('https://api.pinata.cloud/pinning/pinFileToIPFS', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${PINATA_JWT}` },
+    body: fileForm,
+  });
+  const imageUrl = IPFS_GATEWAY + fileRes.IpfsHash;
 
-  const resp = await fetch('https://pump.fun/api/ipfs', { method: 'POST', body: formData });
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Metadata upload failed (${resp.status}): ${text.slice(0, 200)}`);
-  }
-  return resp.json();
+  // 2) Pin the metadata JSON (pump.fun-compatible shape). Only include socials if set.
+  const metadata = { name, symbol, description: description || '', image: imageUrl, showName: true, createdOn: 'https://pump.fun' };
+  if (twitter) metadata.twitter = twitter;
+  if (telegram) metadata.telegram = telegram;
+  if (website) metadata.website = website;
+
+  const jsonRes = await pinataFetch('https://api.pinata.cloud/pinning/pinJSONToIPFS', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${PINATA_JWT}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pinataContent: metadata }),
+  });
+  return { metadataUri: IPFS_GATEWAY + jsonRes.IpfsHash };
 }
 
 // ────────────────────────────────────────────────────────────────────────────
